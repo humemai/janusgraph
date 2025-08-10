@@ -14,21 +14,34 @@
 
 services:
   janusgraph:
-    image: janusgraph/janusgraph:latest
+    image: janusgraph/janusgraph:1.1.0
     container_name: jce-janusgraph
     environment:
       JANUS_PROPS_TEMPLATE: cql-es
       janusgraph.storage.hostname: jce-cassandra
-      janusgraph.index.search.hostname: jce-elastic
+      janusgraph.index.search.hostname: jce-opensearch
+      janusgraph.index.search.backend: elasticsearch
+      janusgraph.index.search.elasticsearch.http.auth.type: BASIC
+      janusgraph.index.search.elasticsearch.http.auth.basic.username: admin
+      janusgraph.index.search.elasticsearch.http.auth.basic.password: myStrongPassword123!
+      janusgraph.index.search.elasticsearch.ssl.enabled: true
+      janusgraph.index.search.elasticsearch.ssl.disable-hostname-verification: true
+      janusgraph.index.search.elasticsearch.ssl.allow-self-signed-certificates: true
     ports:
       - "8182:8182"
     networks:
       - jce-network
+    depends_on:
+      cassandra:
+        condition: service_healthy
+      opensearch:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "bin/gremlin.sh", "-e", "scripts/remote-connect.groovy"]
       interval: 10s
       timeout: 30s
       retries: 3
+    restart: on-failure
 
   cassandra:
     image: cassandra:4.0.17
@@ -38,25 +51,89 @@ services:
       - "9160:9160"
     networks:
       - jce-network
-
-  elasticsearch:
-    image: elasticsearch:8.17.1
-    container_name: jce-elastic
+    volumes:
+      - cassandra-data:/var/lib/cassandra
+    healthcheck:
+      test: ["CMD", "cqlsh", "-e", "SELECT now() FROM system.local;"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
     environment:
-      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+      - CASSANDRA_START_TIMEOUT=60
+
+  opensearch:
+    image: opensearchproject/opensearch:2.19.3
+    container_name: jce-opensearch
+    hostname: jce-opensearch
+    environment:
+      - "cluster.name=opensearch-cluster"
+      - "node.name=jce-opensearch"
+      - "discovery.type=single-node"
+      - "bootstrap.memory_lock=true"
+      - "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m"
       - "http.host=0.0.0.0"
       - "network.host=0.0.0.0"
       - "transport.host=127.0.0.1"
-      - "cluster.name=docker-cluster"
-      - "xpack.security.enabled=false"
-      - "discovery.type=single-node"
+      - "compatibility.override_main_response_version=true"
+      - "OPENSEARCH_INITIAL_ADMIN_PASSWORD=myStrongPassword123!"
+      - "plugins.security.ssl.http.enabled=true"
+      - "plugins.security.ssl.http.pemcert_filepath=esnode.pem"
+      - "plugins.security.ssl.http.pemkey_filepath=esnode-key.pem"
+      - "plugins.security.ssl.http.pemtrustedcas_filepath=root-ca.pem"
+      - "plugins.security.ssl.transport.enabled=true"
+      - "plugins.security.ssl.transport.pemcert_filepath=esnode.pem"
+      - "plugins.security.ssl.transport.pemkey_filepath=esnode-key.pem"
+      - "plugins.security.ssl.transport.pemtrustedcas_filepath=root-ca.pem"
+      - "plugins.security.authcz.admin_dn=CN=kirk,OU=client,O=client,L=test,C=de"
+      - "plugins.security.nodes_dn=CN=node.example.com,OU=SSL,O=Test,L=Test,C=DE"
+      - "plugins.security.audit.type=internal_opensearch"
+      - "plugins.security.enable_snapshot_restore_privilege=true"
+      - "plugins.security.check_snapshot_restore_write_privileges=true"
+      - "plugins.security.restapi.roles_enabled=[\"all_access\",\"security_rest_api_access\"]"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
     ports:
       - "9200:9200"
+      - "9600:9600"
     networks:
       - jce-network
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "-k", "-u", "admin:myStrongPassword123!", "https://localhost:9200/_cluster/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  opensearch-dashboards:
+    image: opensearchproject/opensearch-dashboards:2.19.3
+    container_name: jce-dashboards
+    ports:
+      - "5601:5601"
+    environment:
+      - "OPENSEARCH_HOSTS=https://jce-opensearch:9200"
+      - "OPENSEARCH_USERNAME=admin"
+      - "OPENSEARCH_PASSWORD=myStrongPassword123!"
+      - "OPENSEARCH_SSL_VERIFICATIONMODE=none"   # accept self-signed certs
+    networks:
+      - jce-network
+    depends_on:
+      opensearch:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-s", "http://localhost:5601/api/status"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
 
   janusgraph-visualizer:
-    image: janusgraph/janusgraph-visualizer:latest
+    image: janusgraph/janusgraph-visualizer:1.0
     container_name: jce-visualizer
     ports:
       - "3000:3000"
@@ -64,7 +141,8 @@ services:
     networks:
       - jce-network
     depends_on:
-      - janusgraph
+      janusgraph:
+        condition: service_healthy
     environment:
       - GRAPH_URL=http://jce-janusgraph:8182
     healthcheck:
@@ -74,5 +152,8 @@ services:
 
 networks:
   jce-network:
+
 volumes:
   janusgraph-default-data:
+  cassandra-data:
+  opensearch-data:
