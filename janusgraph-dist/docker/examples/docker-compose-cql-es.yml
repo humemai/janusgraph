@@ -154,6 +154,5 @@ networks:
   jce-network:
 
 volumes:
-  janusgraph-default-data:
   cassandra-data:
   opensearch-data:
